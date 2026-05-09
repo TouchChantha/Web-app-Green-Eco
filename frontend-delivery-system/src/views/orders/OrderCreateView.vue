@@ -49,6 +49,9 @@
               <MapPinIcon class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-blue-400" />
               <input v-model="form.pickup_address" required
                 :placeholder="t.pickupAddress"
+                @blur="geocodeAddress('pickup')"
+                @keydown.enter.prevent="geocodeAddress('pickup')"
+                @input="form.pickup_lat = null; form.pickup_lng = null"
                 class="w-full pl-9 pr-4 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#3d9a3d] focus:border-transparent transition-all"
                 :class="{ 'border-blue-400 ring-2 ring-blue-200': pickingMode === 'pickup' }" />
             </div>
@@ -67,6 +70,9 @@
               <MapPinIcon class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#3d9a3d]" />
               <input v-model="form.delivery_address" required
                 :placeholder="t.deliveryAddress"
+                @blur="geocodeAddress('delivery')"
+                @keydown.enter.prevent="geocodeAddress('delivery')"
+                @input="form.delivery_lat = null; form.delivery_lng = null"
                 class="w-full pl-9 pr-4 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#3d9a3d] focus:border-transparent transition-all"
                 :class="{ 'border-green-400 ring-2 ring-green-200': pickingMode === 'delivery' }" />
             </div>
@@ -360,6 +366,51 @@ async function reverseGeocode(lat: number, lng: number): Promise<string> {
       }
     })
   })
+}
+
+/** Forward geocode: typed address → lat/lng + place pin on map */
+async function geocodeAddress(type: 'pickup' | 'delivery') {
+  const address = type === 'pickup' ? form.pickup_address : form.delivery_address
+  if (!address?.trim()) return
+
+  // Skip if lat/lng already set (came from map click)
+  const alreadySet = type === 'pickup' ? form.pickup_lat : form.delivery_lat
+  if (alreadySet) return
+
+  const g = (window as any).google
+  if (!g?.maps?.Geocoder) return
+
+  geocoding.value = true
+  try {
+    await new Promise<void>((resolve) => {
+      const geocoder = new g.maps.Geocoder()
+      // Bias results toward Phnom Penh
+      geocoder.geocode(
+        { address, region: 'KH', bounds: new g.maps.LatLngBounds(
+          { lat: 11.4, lng: 104.7 }, { lat: 11.7, lng: 105.1 }
+        )},
+        (results: any[], status: string) => {
+          if (status === 'OK' && results[0]) {
+            const loc = results[0].geometry.location
+            const lat: number = loc.lat()
+            const lng: number = loc.lng()
+            if (type === 'pickup') {
+              form.pickup_lat = lat
+              form.pickup_lng = lng
+            } else {
+              form.delivery_lat = lat
+              form.delivery_lng = lng
+            }
+            placeMarker(type, lat, lng)
+            if (gmap) gmap.panTo({ lat, lng })
+          }
+          resolve()
+        }
+      )
+    })
+  } finally {
+    geocoding.value = false
+  }
 }
 
 function initMap() {

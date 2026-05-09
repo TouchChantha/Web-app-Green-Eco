@@ -38,24 +38,11 @@
               <StatusBadge :status="order.status" />
             </div>
 
-            <!-- Route map placeholder -->
-            <div class="relative bg-slate-50 rounded-xl h-44 overflow-hidden border border-slate-200">
-              <div class="absolute inset-0 opacity-30"
-                style="background-image: linear-gradient(#e2e8f0 1px, transparent 1px), linear-gradient(90deg, #e2e8f0 1px, transparent 1px); background-size: 28px 28px;">
-              </div>
-              <!-- Driver dot -->
-              <div class="absolute top-1/3 left-1/4 w-4 h-4 rounded-full bg-blue-500 border-2 border-white shadow-md"></div>
-              <!-- Delivery point -->
-              <div class="absolute bottom-1/3 right-1/4 flex flex-col items-center">
-                <div class="w-5 h-5 rounded-full bg-red-500 border-2 border-white shadow-md"></div>
-                <div class="w-0.5 h-2 bg-red-500"></div>
-                <div class="w-1 h-1 rounded-full bg-red-500"></div>
-              </div>
-              <!-- Route line -->
-              <svg class="absolute inset-0 w-full h-full" style="pointer-events:none">
-                <line x1="25%" y1="33%" x2="75%" y2="67%" stroke="#3d9a3d" stroke-width="2" stroke-dasharray="6,4" opacity="0.6"/>
-              </svg>
-              <div class="absolute inset-0 flex items-center justify-center">
+            <!-- Route map — real Google Map -->
+            <div class="relative rounded-xl overflow-hidden border border-slate-200" style="height:176px;">
+              <div ref="orderMapEl" style="width:100%;height:100%;"></div>
+              <!-- Fallback overlay when map not loaded -->
+              <div v-if="!mapReady" class="absolute inset-0 bg-slate-50 flex items-center justify-center">
                 <p class="text-xs text-slate-400 bg-white/80 px-3 py-1.5 rounded-lg">Route map — driver position + delivery point</p>
               </div>
             </div>
@@ -183,16 +170,13 @@
                     </span>
                     <span class="text-xs text-slate-600 capitalize">{{ d.status.replace('_', ' ') }}</span>
                   </div>
-                  <button v-if="d.status === 'available'"
+                  <button v-if="d.status !== 'on_delivery'"
                     @click="assignDriver(d.id)"
                     :disabled="assigning"
                     class="px-3 py-1.5 bg-[#0d3320] text-white text-xs font-semibold rounded-lg hover:bg-[#1a4731] transition-colors disabled:opacity-60">
                     Assign
                   </button>
-                  <button v-else disabled
-                    class="px-3 py-1.5 bg-slate-100 text-slate-400 text-xs font-semibold rounded-lg cursor-not-allowed">
-                    Assign
-                  </button>
+                  <span v-else class="px-3 py-1.5 bg-slate-100 text-slate-400 text-xs font-semibold rounded-lg">Busy</span>
                 </div>
               </div>
               <p v-if="!loadingDrivers && filteredDrivers.length === 0"
@@ -282,11 +266,14 @@
                     <p class="text-xs text-slate-400">{{ d.vehicle_type }} · {{ d.vehicle_plate }}</p>
                   </div>
                   <StatusBadge :status="d.status" />
-                  <button v-if="d.status === 'available'" @click="assignDriver(d.id)" :disabled="assigning"
+                  <button v-if="d.status !== 'on_delivery'" @click="assignDriver(d.id)" :disabled="assigning"
                     class="px-3 py-1.5 bg-[#0d3320] text-white text-xs font-semibold rounded-lg hover:bg-[#1a4731] transition-colors disabled:opacity-60">
                     Assign
                   </button>
+                  <span v-else class="px-3 py-1.5 bg-slate-100 text-slate-400 text-xs font-semibold rounded-lg">Busy</span>
                 </div>
+                <p v-if="!loadingDrivers && filteredDrivers.length === 0"
+                  class="text-center py-6 text-slate-400 text-sm">No drivers found</p>
               </div>
               <button @click="showAssignModal = false"
                 class="mt-4 w-full px-4 py-2.5 border border-slate-300 text-slate-600 rounded-xl text-sm hover:bg-slate-50 transition-colors">
@@ -327,13 +314,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import { useAuthStore } from '../../stores/auth'
 import { useOrdersStore } from '../../stores/orders'
 import { useDriversStore } from '../../stores/drivers'
 import { routesApi } from '../../api/routes'
 import { openGoogleMapsDirections } from '../../utils/maps'
+import { loadGoogleMaps, isMapsLoaded } from '../../composables/useGoogleMaps'
 import StatusBadge from '../../components/ui/StatusBadge.vue'
 import PriorityBadge from '../../components/ui/PriorityBadge.vue'
 import LoadingSpinner from '../../components/ui/LoadingSpinner.vue'
@@ -358,6 +346,15 @@ const assigning = ref(false)
 const optimizing = ref(false)
 const actionLoading = ref(false)
 
+// ── Map state ──────────────────────────────────────────────────────────────
+const orderMapEl = ref<HTMLElement | null>(null)
+const mapReady = ref(false)
+let gmap: any = null
+let pickupMarker: any = null
+let deliveryMarker: any = null
+let driverMarker: any = null
+let routePolyline: any = null
+
 const filteredDrivers = computed(() => {
   if (!driverSearch.value) return driversStore.drivers
   const q = driverSearch.value.toLowerCase()
@@ -369,11 +366,13 @@ const filteredDrivers = computed(() => {
 async function load() {
   await store.fetchOrder(Number(route.params.id))
   order.value = store.currentOrder
+  // Render map after order data is available
+  await renderOrderMap()
 }
 
 async function loadDrivers() {
   loadingDrivers.value = true
-  await driversStore.fetchDrivers({ per_page: 50 })
+  await driversStore.fetchDrivers({ per_page: 100 })
   loadingDrivers.value = false
 }
 
@@ -425,6 +424,117 @@ async function driverUpdateStatus(status: string, notes?: string) {
   }
 }
 
+// ── Map rendering ──────────────────────────────────────────────────────────
+
+function makePin(color: string, label: string): HTMLElement {
+  const el = document.createElement('div')
+  el.style.cssText = `
+    width:28px;height:28px;border-radius:50%;
+    background:${color};border:3px solid #fff;
+    box-shadow:0 2px 6px rgba(0,0,0,0.35);
+    display:flex;align-items:center;justify-content:center;
+    font-size:11px;font-weight:700;color:#fff;font-family:Inter,sans-serif;
+  `
+  el.textContent = label
+  return el
+}
+
+async function renderOrderMap() {
+  if (!orderMapEl.value) return
+  const o = order.value
+  if (!o) return
+
+  try {
+    await loadGoogleMaps()
+  } catch { return }
+
+  if (!isMapsLoaded()) return
+
+  const g = (window as any).google
+  const PP = { lat: 11.5564, lng: 104.9282 }
+
+  // Determine center: prefer pickup coords, fall back to Phnom Penh
+  const center = o.pickup_lat && o.pickup_lng
+    ? { lat: Number(o.pickup_lat), lng: Number(o.pickup_lng) }
+    : PP
+
+  if (!gmap) {
+    gmap = new g.maps.Map(orderMapEl.value, {
+      center,
+      zoom: 13,
+      mapId: 'DEMO_MAP_ID',
+      mapTypeControl: false,
+      streetViewControl: false,
+      fullscreenControl: false,
+      zoomControl: true,
+    })
+    mapReady.value = true
+  }
+
+  const AdvancedMarker = g.maps.marker?.AdvancedMarkerElement ?? g.maps.Marker
+
+  // Clear old markers
+  const clearMarker = (m: any) => {
+    if (!m) return
+    if (typeof m.setMap === 'function') m.setMap(null)
+    else m.map = null
+  }
+  clearMarker(pickupMarker); clearMarker(deliveryMarker)
+  clearMarker(driverMarker); routePolyline?.setMap(null)
+
+  const bounds = new g.maps.LatLngBounds()
+
+  // Pickup pin
+  if (o.pickup_lat && o.pickup_lng) {
+    const pos = { lat: Number(o.pickup_lat), lng: Number(o.pickup_lng) }
+    pickupMarker = new AdvancedMarker({ position: pos, map: gmap, content: makePin('#3b82f6', 'P'), title: 'Pickup', zIndex: 10 })
+    bounds.extend(pos)
+  }
+
+  // Delivery pin
+  if (o.delivery_lat && o.delivery_lng) {
+    const pos = { lat: Number(o.delivery_lat), lng: Number(o.delivery_lng) }
+    deliveryMarker = new AdvancedMarker({ position: pos, map: gmap, content: makePin('#ef4444', 'D'), title: 'Delivery', zIndex: 10 })
+    bounds.extend(pos)
+  }
+
+  // Driver pin (if assigned and has location)
+  if (o.driver?.current_lat && o.driver?.current_lng) {
+    const pos = { lat: Number(o.driver.current_lat), lng: Number(o.driver.current_lng) }
+    driverMarker = new AdvancedMarker({ position: pos, map: gmap, content: makePin('#f59e0b', 'T'), title: o.driver.user?.name ?? 'Driver', zIndex: 20 })
+    bounds.extend(pos)
+  }
+
+  // Route polyline — use Google encoded polyline if available, else straight line
+  if (o.route?.polyline) {
+    // Decode and draw the real road polyline from Google Directions
+    const path = g.maps.geometry?.encoding?.decodePath(o.route.polyline)
+    if (path) {
+      routePolyline = new g.maps.Polyline({
+        path, map: gmap,
+        strokeColor: '#1a73e8', strokeOpacity: 0.85, strokeWeight: 4, geodesic: false,
+      })
+      path.forEach((p: any) => bounds.extend(p))
+    }
+  } else if (o.pickup_lat && o.delivery_lat) {
+    // Fallback: dashed straight line
+    routePolyline = new g.maps.Polyline({
+      path: [
+        { lat: Number(o.pickup_lat), lng: Number(o.pickup_lng) },
+        { lat: Number(o.delivery_lat), lng: Number(o.delivery_lng) },
+      ],
+      map: gmap,
+      strokeColor: '#3d9a3d', strokeOpacity: 0.6, strokeWeight: 2, geodesic: true,
+      icons: [{ icon: { path: 'M 0,-1 0,1', strokeOpacity: 0.8, scale: 3 }, offset: '0', repeat: '12px' }],
+    })
+  }
+
+  // Fit map to show all markers
+  if (!bounds.isEmpty()) {
+    gmap.fitBounds(bounds, { top: 40, right: 40, bottom: 40, left: 40 })
+  }
+}
+
 function formatDateTime(d: string) {
   return new Date(d).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
@@ -438,6 +548,16 @@ function formatDuration(mins: number) {
 onMounted(async () => {
   await load()
   if (auth.isAdmin) loadDrivers()
+})
+
+onUnmounted(() => {
+  const clearM = (m: any) => {
+    if (!m) return
+    if (typeof m.setMap === 'function') m.setMap(null)
+    else m.map = null
+  }
+  clearM(pickupMarker); clearM(deliveryMarker); clearM(driverMarker)
+  routePolyline?.setMap(null)
 })
 
 watch(showAssignModal, (v) => { if (v && auth.isAdmin) loadDrivers() })

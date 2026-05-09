@@ -11,8 +11,8 @@ return new class extends Migration {
             $table->foreignId('delivery_order_id');
             $table->unsignedTinyInteger('sequence');
             $table->text('address');
-            $table->decimal('lat', 10, 7);
-            $table->decimal('lng', 10, 7);
+            $table->decimal('lat', 10, 7)->nullable();
+            $table->decimal('lng', 10, 7)->nullable();
             $table->enum('type', ['pickup', 'delivery', 'waypoint']);
             $table->enum('status', ['pending', 'reached', 'completed', 'skipped'])->default('pending');
             $table->timestamp('arrived_at')->nullable();
